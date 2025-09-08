@@ -1,82 +1,54 @@
 pipeline {
   agent any
-  triggers { githubPush() }
-  options { timestamps(); disableConcurrentBuilds() }
+
+  // Use either webhook trigger OR polling (keep only one of these two 'triggers' blocks)
+  triggers {
+    // For GitHub webhooks (recommended)
+    githubPush()
+    // Fallback (comment above line and uncomment this if you can't open 8080 to GitHub):
+    // pollSCM('H/2 * * * *') // check every ~30 mins
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
 
   stages {
-    stage('Checkout') { steps { checkout scm } }
-
-stage('SonarQube Analysis') {
-  steps {
-    withSonarQubeEnv('sonar-local') {
-      script {
-        def scannerHome = tool 'SonarScanner'
-        sh """
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+    stage('Build Docker Image') {
+      steps {
+        sh '''
           set -e
-          "${scannerHome}/bin/sonar-scanner" \
-            -Dsonar.projectKey=myweb \
-            -Dsonar.sources=. \
-            -Dsonar.sourceEncoding=UTF-8
-        """
+          docker build -t myweb:${BUILD_NUMBER} .
+          docker tag myweb:${BUILD_NUMBER} myweb:latest
+        '''
+      }
+    }
+    stage('Deploy Container') {
+      steps {
+        sh '''
+          set -e
+          # Stop & remove any previous container named 'myweb'
+          if [ "$(docker ps -aq -f name=myweb)" ]; then
+            docker rm -f myweb || true
+          fi
+          # Run new container on host port 80
+          docker run -d --name myweb -p 80:80 myweb:latest
+        '''
       }
     }
   }
-}
-
-    stage('Quality Gate') {
-      steps {
-        timeout(time: 3, unit: 'MINUTES') {
-          waitForQualityGate abortPipeline: true
-        }
-      }
-    }
-
-stage('Build Docker Image') {
-      steps {
-        script {
-          sh '''
-            set -e
-            docker build -t myweb:${BUILD_NUMBER} .
-            docker tag myweb:${BUILD_NUMBER} myweb:latest
-          '''
-          // Capture the image ID of the freshly built :latest
-          env.BUILT_IMAGE_ID = sh(
-            returnStdout: true,
-            script: "docker inspect --format='{{.Id}}' myweb:latest"
-          ).trim()
-          echo "Built image ID: ${env.BUILT_IMAGE_ID}"
-        }
-      }
-    }
-
-    stage('Deploy Container (only if changed)') {
-      steps {
-        script {
-          // Get the image ID the current 'myweb' container is running (if any)
-          def runningId = sh(
-            returnStdout: true,
-            script: "docker inspect --format='{{.Image}}' myweb 2>/dev/null || true"
-          ).trim()
-
-          echo "Running image ID: ${runningId ?: '(none)'}"
-
-          if (runningId != env.BUILT_IMAGE_ID) {
-            echo "Image changed → redeploying"
-            sh '''
-              set -e
-              docker rm -f myweb || true
-              docker run -d --name myweb -p 80:80 myweb:latest
-            '''
-          } else {
-            echo "Image unchanged → skipping redeploy"
-          }
-        }
-      }
-    }
-  }
-
   post {
-    success { echo "Deployed. http://<EC2-Public-IP>/" }
-    failure { echo "Build failed." }
+    success {
+      echo "Deployed successfully. Visit http://$JENKINS_URL to check Jenkins and http://<EC2-Public-IP>/ for site."
+    }
+    failure {
+      echo "Build failed. Check console output."
+    }
   }
 }
